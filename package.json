@@ -1,0 +1,47 @@
+{
+  "name": "keystore-kit",
+  "version": "0.1.0",
+  "description": "Browser key-at-rest: protect a secret with PIN / WebAuthn-PRF / grace, pluggable storage, burn. Curve-agnostic, pure Web Crypto, zero runtime deps.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "keystore",
+    "webauthn",
+    "passkey",
+    "aes-gcm",
+    "pbkdf2",
+    "key-at-rest",
+    "indexeddb",
+    "browser",
+    "nostr",
+    "typescript",
+    "esm"
+  ],
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^2.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "files": [
+    "dist"
+  ]
+}
