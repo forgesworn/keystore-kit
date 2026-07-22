@@ -22,4 +22,25 @@ describe('secret', () => {
     expect(isEncrypted('YWJj')).toBe(false) // valid base64 but only 3 bytes
     expect(isEncrypted('!!!')).toBe(false)  // not base64 at all
   })
+
+  it('rejects decryption of non-base64 garbage rather than returning silently-wrong plaintext', async () => {
+    await expect(decryptSecret('!!!not-base64!!!', 'pass')).rejects.toThrow()
+  })
+
+  it('produces different ciphertext for the same plaintext and passphrase each call (random salt + iv)', async () => {
+    const a = await encryptSecret('same secret', 'same pass')
+    const b = await encryptSecret('same secret', 'same pass')
+    expect(a).not.toBe(b)
+    // Both still round-trip correctly under the same passphrase.
+    expect(await decryptSecret(a, 'same pass')).toBe('same secret')
+    expect(await decryptSecret(b, 'same pass')).toBe('same secret')
+  })
+
+  it('rejects a tampered payload (flipped byte in the ciphertext region)', async () => {
+    const enc = await encryptSecret('my-nsec-or-key-hex', 'pass')
+    const bytes = Uint8Array.from(atob(enc), (c) => c.charCodeAt(0))
+    bytes[bytes.length - 1] ^= 0xff // flip a byte inside the GCM-tagged ciphertext
+    const tampered = btoa(String.fromCharCode(...bytes))
+    await expect(decryptSecret(tampered, 'pass')).rejects.toThrow()
+  })
 })
