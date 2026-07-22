@@ -1,0 +1,103 @@
+# keystore-kit
+
+> Every PWA that holds a private key on-device ends up hand-rolling its own key-at-rest protection — a PIN wrapper here, a WebAuthn prompt there, usually untested. keystore-kit is a curve-agnostic, zero-runtime-dependency TypeScript library that protects one opaque secret behind a **PIN**, a **WebAuthn-PRF** biometric, or a short-lived **grace** key, with pluggable storage and an irreversible **burn**. Extracted from the audited `signet-app` `auth.ts` (last reviewed 2026-03-16), with its platform couplings replaced by injected seams — the crypto is unchanged from the reviewed source.
+
+ESM-only. Single entry point: `keystore-kit` (no subpath exports).
+
+## Install
+
+npm install keystore-kit
+
+## Exports
+
+### Keystore (main class)
+
+`new Keystore(storage, config, webauthn?)` — `storage` implements `KeystoreStorage`, `config` is a `KeystoreConfig` (`{ rpId, rpName, prfSalt, hkdfInfo?, namespace? }`), `webauthn` is an optional `WebAuthnProvider` (omit it to disable biometric unlock entirely).
+
+PIN protection:
+- setupPIN(passphrase, secret) → Promise\<void\> — PBKDF2-SHA-256 (600,000 iterations) → AES-256-GCM
+- unlockPIN(passphrase) → Promise\<string | null\> — null on the wrong passphrase or nothing set up
+- changePIN(current, next) → Promise\<boolean\> — false if `current` is wrong; re-wraps under `next` on success
+
+WebAuthn-PRF (biometric):
+- isBiometricAvailable() → Promise\<boolean\>
+- setupBiometric(secret) → Promise\<SetupBiometricResult\> — `{ ok, prfSupported }`. Prefers the hardware PRF-derived key; falls back to a credential-id-derived key when the PRF extension is absent
+- unlockBiometric() → Promise\<string | null\>
+- enableBiometric(secret) → Promise\<SetupBiometricResult\> — alias for setupBiometric
+- disableBiometric(secret, newPassphrase) → Promise\<void\> — drops the credential, re-wraps under a PIN
+
+Grace (short-lived, no-prompt unlock):
+- setupGrace(secret) → Promise\<void\> — wraps under a non-extractable `CryptoKey` held in storage
+- unlockGrace() → Promise\<string | null\> — no passphrase or biometric check; see security note below
+- endGraceWithPin(passphrase, secret) → Promise\<void\> — re-wraps under a PIN, then clears the grace key (atomic: only clears on success)
+- endGraceWithBiometric(secret) → Promise\<void\> — re-wraps under biometric, then clears the grace key; throws if biometric setup fails (grace is left intact)
+
+Lifecycle:
+- generateSecret() → string — random 256-bit secret as a 64-char hex string
+- isSetUp() → boolean
+- method() → UnlockMethod | null — `'pin' | 'biometric' | 'grace' | null`
+- burn() → Promise\<void\> — wipes every blob and the grace key (irreversible)
+
+### Storage & WebAuthn adapters
+
+- InMemoryKeystoreStorage — Node / tests / ephemeral sessions; implements `KeystoreStorage`
+- browserStorage() → KeystoreStorage — localStorage (string KV) + IndexedDB (grace key). Browser-only.
+- browserWebAuthn() → WebAuthnProvider — `navigator.credentials`, requests the PRF extension. Browser-only.
+- KeystoreStorage / WebAuthnProvider / KeystoreConfig / UnlockMethod / SetupBiometricResult / GraceKeyRecord — types. Implement `KeystoreStorage`/`WebAuthnProvider` yourself to target another platform (React Native, Electron, a server-side vault, …)
+
+### Standalone primitives
+
+The lower layers `Keystore` is built from. Use these directly if you just need "encrypt a secret under a passphrase" without the PIN/biometric/grace lifecycle.
+
+- encryptSecret(plaintext, passphrase) → Promise\<string\> — self-describing wire format: `base64(salt‖iv‖ciphertext)`
+- decryptSecret(encrypted, passphrase) → Promise\<string\> — throws on the wrong passphrase or a malformed/tampered payload
+- isEncrypted(value) → boolean — heuristic check that a string looks like `encryptSecret` output
+- deriveAesKey(passphrase, salt) → Promise\<CryptoKey\> — PBKDF2-SHA-256 → non-extractable AES-256-GCM key
+- aesEncrypt(plaintext, key) → Promise\<{ iv, ciphertext }\>
+- aesDecrypt(iv, ciphertext, key) → Promise\<string\> — throws on the wrong key or a tampered ciphertext (GCM tag check)
+- PBKDF2_ITERATIONS (600000), SALT_LENGTH (16), IV_LENGTH (12) — the constants above are built from
+
+## Quick Examples
+
+```typescript
+import { Keystore, browserStorage, browserWebAuthn } from 'keystore-kit'
+
+const ks = new Keystore(
+  browserStorage(),
+  { rpId: location.hostname, rpName: 'My App', prfSalt: APP_PRF_SALT }, // 32 app-constant bytes
+  browserWebAuthn(),
+)
+
+// First run: protect a freshly generated (or your own) secret.
+const secret = ks.generateSecret() // or your own nsec / Curve25519 / Ed25519 key as hex
+await ks.setupPIN('123456', secret)
+if (await ks.isBiometricAvailable()) await ks.enableBiometric(secret)
+
+// Later: unlock.
+const recovered = await ks.unlockBiometric() ?? await ks.unlockPIN(pin)
+
+// Wipe everything.
+await ks.burn()
+```
+
+```typescript
+// Node / tests — no browser globals required
+import { Keystore, InMemoryKeystoreStorage } from 'keystore-kit'
+
+const config = { rpId: 'localhost', rpName: 'Test', prfSalt: new Uint8Array(32) }
+const ks = new Keystore(new InMemoryKeystoreStorage(), config)
+await ks.setupPIN('123456', 'deadbeef'.repeat(8))
+await ks.unlockPIN('123456') // → 'deadbeef...'
+```
+
+```typescript
+// Standalone primitive — no Keystore, no storage, just "protect this string"
+import { encryptSecret, decryptSecret } from 'keystore-kit'
+
+const enc = await encryptSecret('my-nsec-or-key-hex', 'a-passphrase')
+const plain = await decryptSecret(enc, 'a-passphrase') // throws on the wrong passphrase
+```
+
+## Optional
+
+- README.md: full security-model note (what each unlock method protects against and what it does not) and the curve-agnostic design rationale
