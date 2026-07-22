@@ -9,7 +9,7 @@
 
 A small building block for any web/PWA app that holds a private key on-device. The secret it protects is an **opaque string** — a random hex key, an `nsec`, a Curve25519/Ed25519 secret — so the keystore is **curve-agnostic**: it never interprets what it guards.
 
-Extracted from the audited [`signet-app`](https://github.com/forgesworn/signet-app) `auth.ts` (last reviewed 2026-03-16), with its three couplings — `localStorage`, the IndexedDB grace store, and the hardcoded RP-id / PRF salt / app name — replaced by injected seams. **The crypto is unchanged from the reviewed source.**
+Extracted from the audited `signet-app` `auth.ts` (last reviewed 2026-03-16), with its three couplings — `localStorage`, the IndexedDB grace store, and the hardcoded RP-id / PRF salt / app name — replaced by injected seams. **The crypto is unchanged from the reviewed source.**
 
 ## Why keystore-kit?
 
