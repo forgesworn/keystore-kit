@@ -21,29 +21,38 @@ PIN protection:
 
 WebAuthn-PRF (biometric):
 - isBiometricAvailable() → Promise\<boolean\>
-- setupBiometric(secret) → Promise\<SetupBiometricResult\> — `{ ok, prfSupported }`. Prefers the hardware PRF-derived key; falls back to a credential-id-derived key when the PRF extension is absent
+- setupBiometric(secret, opts?: BiometricSetupOptions) → Promise\<SetupBiometricResult\> — writes its own slot (an existing PIN wrap is untouched). Prefers the hardware PRF-derived key. The weaker credential-id-derived fallback is opt-in only: pass `{ allowDeviceFallback: true }`, otherwise a PRF-less authenticator yields `{ ok: false, reason: 'prf-unsupported' }` and nothing is written
 - unlockBiometric() → Promise\<string | null\>
-- enableBiometric(secret) → Promise\<SetupBiometricResult\> — alias for setupBiometric
-- disableBiometric(secret, newPassphrase) → Promise\<void\> — drops the credential, re-wraps under a PIN
+- enableBiometric(secret, opts?) → Promise\<SetupBiometricResult\> — alias for setupBiometric
+- disableBiometric(secret, newPassphrase) → Promise\<void\> — drops the biometric slot and credential, re-wraps under a PIN
+
+`SetupBiometricResult` (discriminated union — the fallback is never silent):
+- `{ ok: true, prfSupported: true }` — hardware PRF key
+- `{ ok: true, prfSupported: false, fallback: 'device' }` — the opt-in device-bound wrap was used; storage-readable key material, prefer PIN as primary
+- `{ ok: false, prfSupported: false, reason }` — `reason` is `'no-provider' | 'cancelled' | 'prf-unsupported' | 'error'`
+
+`BiometricSetupOptions` = `{ allowDeviceFallback?: boolean }`
 
 Grace (short-lived, no-prompt unlock):
 - setupGrace(secret) → Promise\<void\> — wraps under a non-extractable `CryptoKey` held in storage
 - unlockGrace() → Promise\<string | null\> — no passphrase or biometric check; see security note below
 - endGraceWithPin(passphrase, secret) → Promise\<void\> — re-wraps under a PIN, then clears the grace key (atomic: only clears on success)
-- endGraceWithBiometric(secret) → Promise\<void\> — re-wraps under biometric, then clears the grace key; throws if biometric setup fails (grace is left intact)
+- endGraceWithBiometric(secret, opts?: BiometricSetupOptions) → Promise\<void\> — re-wraps under biometric, then clears the grace key; throws if biometric setup fails (grace is left intact)
 
 Lifecycle:
 - generateSecret() → string — random 256-bit secret as a 64-char hex string
 - isSetUp() → boolean
-- method() → UnlockMethod | null — `'pin' | 'biometric' | 'grace' | null`
-- burn() → Promise\<void\> — wipes every blob and the grace key (irreversible)
+- method() → UnlockMethod | null — the *most recently configured* of `'pin' | 'biometric' | 'grace'`; PIN and biometric wraps are independent slots and both stay usable
+- burn() → Promise\<void\> — wipes every blob (current and pre-0.2 legacy layouts) and the grace key (irreversible)
+
+Storage layout: `<ns>.pin.encryptedKey`, `<ns>.biometric.credentialId`, `<ns>.biometric.encryptedKey`, plus the informational `<ns>.method` flag. Pre-0.2 single-slot data (`<ns>.encryptedKey` + `<ns>.credentialId`) still unlocks — legacy entries are read when the new ones are absent (biometric wraps carry a `prf` flag, PIN wraps do not); re-enabling a method rewrites its wrap into the new slot and drops the stale legacy copy.
 
 ### Storage & WebAuthn adapters
 
 - InMemoryKeystoreStorage — Node / tests / ephemeral sessions; implements `KeystoreStorage`
 - browserStorage() → KeystoreStorage — localStorage (string KV) + IndexedDB (grace key). Browser-only.
 - browserWebAuthn() → WebAuthnProvider — `navigator.credentials`, requests the PRF extension. Browser-only.
-- KeystoreStorage / WebAuthnProvider / KeystoreConfig / UnlockMethod / SetupBiometricResult / GraceKeyRecord — types. Implement `KeystoreStorage`/`WebAuthnProvider` yourself to target another platform (React Native, Electron, a server-side vault, …)
+- KeystoreStorage / WebAuthnProvider / KeystoreConfig / UnlockMethod / BiometricSetupOptions / SetupBiometricResult / SetupBiometricFailureReason / GraceKeyRecord — types. Implement `KeystoreStorage`/`WebAuthnProvider` yourself to target another platform (React Native, Electron, a server-side vault, …)
 
 ### Standalone primitives
 
@@ -71,9 +80,14 @@ const ks = new Keystore(
 // First run: protect a freshly generated (or your own) secret.
 const secret = ks.generateSecret() // or your own nsec / Curve25519 / Ed25519 key as hex
 await ks.setupPIN('123456', secret)
-if (await ks.isBiometricAvailable()) await ks.enableBiometric(secret)
+if (await ks.isBiometricAvailable()) {
+  const r = await ks.enableBiometric(secret) // PIN unlock keeps working — separate slots
+  if (!r.ok && r.reason === 'prf-unsupported') {
+    // stay PIN-only, or ask the user and retry with { allowDeviceFallback: true }
+  }
+}
 
-// Later: unlock.
+// Later: unlock with either method.
 const recovered = await ks.unlockBiometric() ?? await ks.unlockPIN(pin)
 
 // Wipe everything.

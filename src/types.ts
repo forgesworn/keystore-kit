@@ -1,17 +1,38 @@
 /** The three unlock methods a {@link Keystore} can protect a secret behind. */
 export type UnlockMethod = 'pin' | 'biometric' | 'grace'
 
-/**
- * Result of a biometric setup attempt. `prfSupported: false` means the device
- * lacks the WebAuthn PRF extension and the key material was derived from the
- * credential ID instead (still biometric-gated, but weaker — vulnerable to
- * offline extraction of stored data). Surface this so the user can opt into PIN
- * as the primary unlock instead.
- */
-export interface SetupBiometricResult {
-  ok: boolean
-  prfSupported: boolean
+/** Options for {@link Keystore.setupBiometric} / {@link Keystore.enableBiometric}. */
+export interface BiometricSetupOptions {
+  /**
+   * Explicitly opt in to the weaker device-bound fallback when the
+   * authenticator lacks the WebAuthn PRF extension: the wrapping key is then
+   * derived from the credential id, which is stored alongside the ciphertext —
+   * anyone with read access to the underlying storage can unwrap the secret
+   * without any user verification. Leave unset to refuse the fallback; setup
+   * then returns `{ ok: false, reason: 'prf-unsupported' }` and writes nothing.
+   */
+  allowDeviceFallback?: boolean
 }
+
+/** Why a biometric setup attempt did not complete. */
+export type SetupBiometricFailureReason =
+  | 'no-provider'      // no WebAuthnProvider wired into the Keystore
+  | 'cancelled'        // credential creation failed or was aborted by the user
+  | 'prf-unsupported'  // authenticator lacks PRF and allowDeviceFallback was not set
+  | 'error'            // the provider threw (hardware/platform error)
+
+/**
+ * Result of a biometric setup attempt. The weaker device-bound fallback never
+ * happens silently: it requires `allowDeviceFallback: true`, and when it was
+ * used the result is the `{ ok: true, prfSupported: false, fallback: 'device' }`
+ * variant — surface that to the user and prefer PIN as the primary unlock on
+ * devices without PRF. When PRF is absent and no opt-in was given, the result
+ * is `{ ok: false, reason: 'prf-unsupported' }` and nothing is written.
+ */
+export type SetupBiometricResult =
+  | { ok: true; prfSupported: true }
+  | { ok: true; prfSupported: false; fallback: 'device' }
+  | { ok: false; prfSupported: false; reason: SetupBiometricFailureReason }
 
 /** The grace-key record: a non-extractable AES-GCM handle plus the secret wrapped under it. */
 export interface GraceKeyRecord {

@@ -65,7 +65,7 @@ describe('Keystore — PIN', () => {
     const storage = new InMemoryKeystoreStorage()
     const ks = new Keystore(storage, config)
     await ks.setupPIN('123456', SECRET)
-    storage.setItem('keystore.encryptedKey', JSON.stringify({ encrypted: 12345, salt: 'AAAA' }))
+    storage.setItem('keystore.pin.encryptedKey', JSON.stringify({ encrypted: 12345, salt: 'AAAA' }))
     expect(await ks.unlockPIN('123456')).toBeNull()
   })
 
@@ -73,14 +73,14 @@ describe('Keystore — PIN', () => {
     const storage = new InMemoryKeystoreStorage()
     const ks = new Keystore(storage, config)
     await ks.setupPIN('123456', SECRET)
-    storage.setItem('keystore.encryptedKey', JSON.stringify({ encrypted: 'abcd', salt: 42 }))
+    storage.setItem('keystore.pin.encryptedKey', JSON.stringify({ encrypted: 'abcd', salt: 42 }))
     expect(await ks.unlockPIN('123456')).toBeNull()
   })
 
   it('returns null (not a thrown error) when the stored value is not valid JSON', async () => {
     const storage = new InMemoryKeystoreStorage()
     const ks = new Keystore(storage, config)
-    storage.setItem('keystore.encryptedKey', 'not-json-at-all{{{')
+    storage.setItem('keystore.pin.encryptedKey', 'not-json-at-all{{{')
     await expect(ks.unlockPIN('123456')).resolves.toBeNull()
   })
 
@@ -88,11 +88,11 @@ describe('Keystore — PIN', () => {
     const storage = new InMemoryKeystoreStorage()
     const ks = new Keystore(storage, config)
     await ks.setupPIN('123456', SECRET)
-    const raw = JSON.parse(storage.getItem('keystore.encryptedKey')!) as { encrypted: string; salt: string }
+    const raw = JSON.parse(storage.getItem('keystore.pin.encryptedKey')!) as { encrypted: string; salt: string }
     const bytes = Uint8Array.from(atob(raw.encrypted), (c) => c.charCodeAt(0))
     bytes[bytes.length - 1] ^= 0xff // flip a byte inside the GCM tag
     raw.encrypted = btoa(String.fromCharCode(...bytes))
-    storage.setItem('keystore.encryptedKey', JSON.stringify(raw))
+    storage.setItem('keystore.pin.encryptedKey', JSON.stringify(raw))
     expect(await ks.unlockPIN('123456')).toBeNull()
   })
 
@@ -100,9 +100,9 @@ describe('Keystore — PIN', () => {
     const storage = new InMemoryKeystoreStorage()
     const ks = new Keystore(storage, config)
     await ks.setupPIN('123456', SECRET)
-    const raw = JSON.parse(storage.getItem('keystore.encryptedKey')!) as { encrypted: string; salt: string }
+    const raw = JSON.parse(storage.getItem('keystore.pin.encryptedKey')!) as { encrypted: string; salt: string }
     raw.encrypted = btoa('short') // decodes to far fewer bytes than IV + GCM tag requires
-    storage.setItem('keystore.encryptedKey', JSON.stringify(raw))
+    storage.setItem('keystore.pin.encryptedKey', JSON.stringify(raw))
     expect(await ks.unlockPIN('123456')).toBeNull()
   })
 })
@@ -177,24 +177,24 @@ describe('Keystore — biometric (mock WebAuthn)', () => {
     expect(await ks.unlockBiometric()).toBe(SECRET)
   })
 
-  it('fallback path (no PRF): sets up and unlocks via credential-id key', async () => {
+  it('fallback path (no PRF, explicit opt-in): sets up and unlocks via credential-id key', async () => {
     const ks = new Keystore(new InMemoryKeystoreStorage(), config, mockWebAuthn({ prf: false }))
-    const r = await ks.setupBiometric(SECRET)
-    expect(r).toEqual({ ok: true, prfSupported: false })
+    const r = await ks.setupBiometric(SECRET, { allowDeviceFallback: true })
+    expect(r).toEqual({ ok: true, prfSupported: false, fallback: 'device' })
     expect(await ks.unlockBiometric()).toBe(SECRET)
   })
 
   it('fallback path returns null when the assertion is not verified', async () => {
     const base = mockWebAuthn({ prf: false })
     const ks = new Keystore(new InMemoryKeystoreStorage(), config, { ...base, assert: async () => false })
-    await ks.setupBiometric(SECRET)
+    await ks.setupBiometric(SECRET, { allowDeviceFallback: true })
     expect(await ks.unlockBiometric()).toBeNull()
   })
 
   it('is a no-op without a provider', async () => {
     const ks = new Keystore(new InMemoryKeystoreStorage(), config)
     expect(await ks.isBiometricAvailable()).toBe(false)
-    expect(await ks.setupBiometric(SECRET)).toEqual({ ok: false, prfSupported: false })
+    expect(await ks.setupBiometric(SECRET)).toEqual({ ok: false, prfSupported: false, reason: 'no-provider' })
     expect(await ks.unlockBiometric()).toBeNull()
   })
 
@@ -210,7 +210,7 @@ describe('Keystore — biometric (mock WebAuthn)', () => {
   it('setupBiometric returns ok:false when createCredential returns null (e.g. the user cancels)', async () => {
     const base = mockWebAuthn()
     const ks = new Keystore(new InMemoryKeystoreStorage(), config, { ...base, createCredential: async () => null })
-    expect(await ks.setupBiometric(SECRET)).toEqual({ ok: false, prfSupported: false })
+    expect(await ks.setupBiometric(SECRET)).toEqual({ ok: false, prfSupported: false, reason: 'cancelled' })
     expect(ks.isSetUp()).toBe(false)
   })
 
@@ -220,14 +220,26 @@ describe('Keystore — biometric (mock WebAuthn)', () => {
       ...base,
       createCredential: async () => { throw new Error('hardware error') },
     })
-    expect(await ks.setupBiometric(SECRET)).toEqual({ ok: false, prfSupported: false })
+    expect(await ks.setupBiometric(SECRET)).toEqual({ ok: false, prfSupported: false, reason: 'error' })
   })
 
-  it('falls back to the credential-id-derived key when the credential enables PRF but getPRF fails at setup time', async () => {
+  it('reports prf-unsupported (and writes nothing) when the credential enables PRF but getPRF fails at setup time', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const base = mockWebAuthn({ prf: true })
+    const ks = new Keystore(storage, config, { ...base, getPRF: async () => null })
+    const r = await ks.setupBiometric(SECRET)
+    expect(r).toEqual({ ok: false, prfSupported: false, reason: 'prf-unsupported' })
+    expect(storage.getItem('keystore.biometric.credentialId')).toBeNull()
+    expect(storage.getItem('keystore.biometric.encryptedKey')).toBeNull()
+    expect(ks.isSetUp()).toBe(false)
+  })
+
+  it('uses the credential-id-derived key for the same credential when getPRF fails at setup time and the fallback was opted into', async () => {
     const base = mockWebAuthn({ prf: true })
     const ks = new Keystore(new InMemoryKeystoreStorage(), config, { ...base, getPRF: async () => null })
-    const r = await ks.setupBiometric(SECRET)
-    expect(r).toEqual({ ok: true, prfSupported: false })
+    const r = await ks.setupBiometric(SECRET, { allowDeviceFallback: true })
+    expect(r).toEqual({ ok: true, prfSupported: false, fallback: 'device' })
+    // Unlock still goes through getPRF first... no: the stored blob is a fallback blob, so assert() gates it.
     expect(await ks.unlockBiometric()).toBe(SECRET)
   })
 
@@ -257,15 +269,15 @@ describe('Keystore — biometric (mock WebAuthn)', () => {
     const storage = new InMemoryKeystoreStorage()
     const ks = new Keystore(storage, config, mockWebAuthn())
     await ks.setupBiometric(SECRET)
-    storage.setItem('keystore.encryptedKey', JSON.stringify({ encrypted: 999, prf: true }))
+    storage.setItem('keystore.biometric.encryptedKey', JSON.stringify({ encrypted: 999, prf: true }))
     expect(await ks.unlockBiometric()).toBeNull()
   })
 
   it('unlockBiometric returns null on a malformed fallback shape (salt field not a string)', async () => {
     const storage = new InMemoryKeystoreStorage()
     const ks = new Keystore(storage, config, mockWebAuthn({ prf: false }))
-    await ks.setupBiometric(SECRET)
-    storage.setItem('keystore.encryptedKey', JSON.stringify({ encrypted: 'abcd', prf: false }))
+    await ks.setupBiometric(SECRET, { allowDeviceFallback: true })
+    storage.setItem('keystore.biometric.encryptedKey', JSON.stringify({ encrypted: 'abcd', prf: false }))
     expect(await ks.unlockBiometric()).toBeNull()
   })
 
@@ -273,12 +285,227 @@ describe('Keystore — biometric (mock WebAuthn)', () => {
     const storage = new InMemoryKeystoreStorage()
     const ks = new Keystore(storage, config, mockWebAuthn({ prf: true }))
     await ks.setupBiometric(SECRET)
-    const raw = JSON.parse(storage.getItem('keystore.encryptedKey')!) as { encrypted: string; prf: boolean }
+    const raw = JSON.parse(storage.getItem('keystore.biometric.encryptedKey')!) as { encrypted: string; prf: boolean }
     const bytes = Uint8Array.from(atob(raw.encrypted), (c) => c.charCodeAt(0))
     bytes[bytes.length - 1] ^= 0xff // flip a byte inside the GCM tag
     raw.encrypted = btoa(String.fromCharCode(...bytes))
-    storage.setItem('keystore.encryptedKey', JSON.stringify(raw))
+    storage.setItem('keystore.biometric.encryptedKey', JSON.stringify(raw))
     expect(await ks.unlockBiometric()).toBeNull()
+  })
+})
+
+describe('Keystore — independent PIN and biometric slots', () => {
+  it('writes the PIN wrap and the biometric wrap to separate storage entries', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const ks = new Keystore(storage, config, mockWebAuthn())
+    await ks.setupPIN('123456', SECRET)
+    await ks.setupBiometric(SECRET)
+    expect(storage.getItem('keystore.pin.encryptedKey')).not.toBeNull()
+    expect(storage.getItem('keystore.biometric.encryptedKey')).not.toBeNull()
+    expect(storage.getItem('keystore.biometric.credentialId')).not.toBeNull()
+    expect(storage.getItem('keystore.encryptedKey')).toBeNull() // legacy single slot is never written
+    expect(storage.getItem('keystore.credentialId')).toBeNull()
+  })
+
+  it('enabling biometric unlock does not destroy PIN unlock', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const ks = new Keystore(storage, config, mockWebAuthn())
+    await ks.setupPIN('123456', SECRET)
+    const pinBlobBefore = storage.getItem('keystore.pin.encryptedKey')
+    const r = await ks.enableBiometric(SECRET)
+    expect(r).toEqual({ ok: true, prfSupported: true })
+    expect(storage.getItem('keystore.pin.encryptedKey')).toBe(pinBlobBefore) // untouched
+    expect(await ks.unlockPIN('123456')).toBe(SECRET)
+    expect(await ks.unlockBiometric()).toBe(SECRET)
+  })
+
+  it('setting a PIN after biometric setup does not destroy biometric unlock', async () => {
+    const ks = new Keystore(new InMemoryKeystoreStorage(), config, mockWebAuthn())
+    await ks.setupBiometric(SECRET)
+    await ks.setupPIN('123456', SECRET)
+    expect(await ks.unlockBiometric()).toBe(SECRET)
+    expect(await ks.unlockPIN('123456')).toBe(SECRET)
+  })
+
+  it('changePIN re-wraps only the PIN slot; biometric unlock keeps working', async () => {
+    const ks = new Keystore(new InMemoryKeystoreStorage(), config, mockWebAuthn())
+    await ks.setupPIN('111111', SECRET)
+    await ks.enableBiometric(SECRET)
+    expect(await ks.changePIN('111111', '222222')).toBe(true)
+    expect(await ks.unlockPIN('222222')).toBe(SECRET)
+    expect(await ks.unlockPIN('111111')).toBeNull()
+    expect(await ks.unlockBiometric()).toBe(SECRET)
+  })
+
+  it('disableBiometric drops only the biometric slot and re-wraps the PIN', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const ks = new Keystore(storage, config, mockWebAuthn())
+    await ks.setupPIN('111111', SECRET)
+    await ks.enableBiometric(SECRET)
+    await ks.disableBiometric(SECRET, '333333')
+    expect(storage.getItem('keystore.biometric.credentialId')).toBeNull()
+    expect(storage.getItem('keystore.biometric.encryptedKey')).toBeNull()
+    expect(await ks.unlockBiometric()).toBeNull()
+    expect(await ks.unlockPIN('333333')).toBe(SECRET)
+  })
+})
+
+describe('Keystore — device-fallback consent', () => {
+  const ALL_WRAP_KEYS = [
+    'keystore.pin.encryptedKey',
+    'keystore.biometric.credentialId',
+    'keystore.biometric.encryptedKey',
+    'keystore.credentialId',
+    'keystore.encryptedKey',
+    'keystore.method',
+  ]
+
+  it('refuses the fallback without an explicit opt-in, writing nothing', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const ks = new Keystore(storage, config, mockWebAuthn({ prf: false }))
+    const r = await ks.setupBiometric(SECRET)
+    expect(r).toEqual({ ok: false, prfSupported: false, reason: 'prf-unsupported' })
+    for (const key of ALL_WRAP_KEYS) expect(storage.getItem(key)).toBeNull()
+    expect(ks.isSetUp()).toBe(false)
+    expect(await ks.unlockBiometric()).toBeNull()
+  })
+
+  it('enableBiometric without an opt-in refuses the fallback and leaves an existing PIN untouched', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const ks = new Keystore(storage, config, mockWebAuthn({ prf: false }))
+    await ks.setupPIN('123456', SECRET)
+    const r = await ks.enableBiometric(SECRET)
+    expect(r).toEqual({ ok: false, prfSupported: false, reason: 'prf-unsupported' })
+    expect(await ks.unlockPIN('123456')).toBe(SECRET)
+    expect(await ks.unlockBiometric()).toBeNull()
+  })
+
+  it('accepts the fallback with an explicit opt-in and flags it in the result', async () => {
+    const ks = new Keystore(new InMemoryKeystoreStorage(), config, mockWebAuthn({ prf: false }))
+    const r = await ks.enableBiometric(SECRET, { allowDeviceFallback: true })
+    expect(r).toEqual({ ok: true, prfSupported: false, fallback: 'device' })
+    expect(await ks.unlockBiometric()).toBe(SECRET)
+  })
+
+  it('endGraceWithBiometric refuses the fallback without an opt-in and leaves the grace key intact', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const ks = new Keystore(storage, config, mockWebAuthn({ prf: false }))
+    await ks.setupGrace(SECRET)
+    await expect(ks.endGraceWithBiometric(SECRET)).rejects.toThrow('biometric setup failed')
+    expect(await ks.unlockGrace()).toBe(SECRET)
+  })
+})
+
+describe('Keystore — legacy single-slot storage (pre-0.2) tolerance', () => {
+  /** Move the current new-format entries into the pre-0.2 layout: one slot + method flag. */
+  function downgradeToLegacyLayout(storage: InMemoryKeystoreStorage, method: 'pin' | 'biometric'): void {
+    if (method === 'pin') {
+      storage.setItem('keystore.encryptedKey', storage.getItem('keystore.pin.encryptedKey')!)
+      storage.removeItem('keystore.pin.encryptedKey')
+    } else {
+      storage.setItem('keystore.credentialId', storage.getItem('keystore.biometric.credentialId')!)
+      storage.setItem('keystore.encryptedKey', storage.getItem('keystore.biometric.encryptedKey')!)
+      storage.removeItem('keystore.biometric.credentialId')
+      storage.removeItem('keystore.biometric.encryptedKey')
+    }
+    storage.setItem('keystore.method', method)
+  }
+
+  it('unlocks a legacy PIN blob', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    await new Keystore(storage, config).setupPIN('123456', SECRET)
+    downgradeToLegacyLayout(storage, 'pin')
+
+    const ks = new Keystore(storage, config)
+    expect(ks.isSetUp()).toBe(true)
+    expect(ks.method()).toBe('pin')
+    expect(await ks.unlockPIN('123456')).toBe(SECRET)
+    expect(await ks.unlockPIN('000000')).toBeNull()
+  })
+
+  it('unlocks a legacy biometric PRF blob', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const wa = mockWebAuthn({ prf: true })
+    await new Keystore(storage, config, wa).setupBiometric(SECRET)
+    downgradeToLegacyLayout(storage, 'biometric')
+
+    const ks = new Keystore(storage, config, wa)
+    expect(await ks.unlockBiometric()).toBe(SECRET)
+    expect(await ks.unlockPIN('123456')).toBeNull() // a biometric blob is not PIN-unlockable
+  })
+
+  it('unlocks a legacy biometric device-fallback blob', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const wa = mockWebAuthn({ prf: false })
+    await new Keystore(storage, config, wa).setupBiometric(SECRET, { allowDeviceFallback: true })
+    downgradeToLegacyLayout(storage, 'biometric')
+
+    const ks = new Keystore(storage, config, wa)
+    expect(await ks.unlockBiometric()).toBe(SECRET)
+  })
+
+  it('never treats a legacy PIN blob as biometric-unlockable, even with a credential id present', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    await new Keystore(storage, config).setupPIN('123456', SECRET)
+    downgradeToLegacyLayout(storage, 'pin')
+    storage.setItem('keystore.credentialId', 'orphaned-cred-id') // partial/corrupted state
+
+    const ks = new Keystore(storage, config, mockWebAuthn())
+    expect(await ks.unlockBiometric()).toBeNull()
+  })
+
+  it('re-enabling the PIN rewrites to the new slot and removes the legacy blob', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    await new Keystore(storage, config).setupPIN('123456', SECRET)
+    downgradeToLegacyLayout(storage, 'pin')
+
+    const ks = new Keystore(storage, config)
+    await ks.setupPIN('654321', SECRET)
+    expect(storage.getItem('keystore.pin.encryptedKey')).not.toBeNull()
+    expect(storage.getItem('keystore.encryptedKey')).toBeNull() // stale wrap under the old PIN is gone
+    expect(await ks.unlockPIN('654321')).toBe(SECRET)
+    expect(await ks.unlockPIN('123456')).toBeNull()
+  })
+
+  it('re-enabling biometric rewrites to the new slots and removes the legacy entries', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const wa = mockWebAuthn({ prf: true })
+    await new Keystore(storage, config, wa).setupBiometric(SECRET)
+    downgradeToLegacyLayout(storage, 'biometric')
+
+    const ks = new Keystore(storage, config, wa)
+    await ks.setupBiometric(SECRET)
+    expect(storage.getItem('keystore.biometric.encryptedKey')).not.toBeNull()
+    expect(storage.getItem('keystore.encryptedKey')).toBeNull()
+    expect(storage.getItem('keystore.credentialId')).toBeNull()
+    expect(await ks.unlockBiometric()).toBe(SECRET)
+  })
+
+  it('re-enabling the PIN leaves a legacy biometric blob unlockable', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const wa = mockWebAuthn({ prf: true })
+    await new Keystore(storage, config, wa).setupBiometric(SECRET)
+    downgradeToLegacyLayout(storage, 'biometric')
+
+    const ks = new Keystore(storage, config, wa)
+    await ks.setupPIN('123456', SECRET) // must not clobber the legacy biometric wrap
+    expect(await ks.unlockBiometric()).toBe(SECRET)
+    expect(await ks.unlockPIN('123456')).toBe(SECRET)
+  })
+
+  it('burn wipes the legacy keys too', async () => {
+    const storage = new InMemoryKeystoreStorage()
+    const wa = mockWebAuthn({ prf: true })
+    await new Keystore(storage, config, wa).setupBiometric(SECRET)
+    downgradeToLegacyLayout(storage, 'biometric')
+
+    await new Keystore(storage, config, wa).burn()
+    expect(storage.getItem('keystore.encryptedKey')).toBeNull()
+    expect(storage.getItem('keystore.credentialId')).toBeNull()
+    expect(storage.getItem('keystore.method')).toBeNull()
+    expect(storage.getItem('keystore.pin.encryptedKey')).toBeNull()
+    expect(storage.getItem('keystore.biometric.encryptedKey')).toBeNull()
+    expect(storage.getItem('keystore.biometric.credentialId')).toBeNull()
   })
 })
 

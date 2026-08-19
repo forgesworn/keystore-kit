@@ -15,6 +15,8 @@ export type {
   WebAuthnProvider,
   KeystoreConfig,
   UnlockMethod,
+  BiometricSetupOptions,
   SetupBiometricResult,
+  SetupBiometricFailureReason,
   GraceKeyRecord,
 } from './types.js'

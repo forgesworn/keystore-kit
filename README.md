@@ -39,9 +39,15 @@ const ks = new Keystore(
 // First run: protect a freshly generated (or your own) secret.
 const secret = ks.generateSecret()            // or your Curve25519/Ed25519 key as hex
 await ks.setupPIN('123456', secret)
-if (await ks.isBiometricAvailable()) await ks.enableBiometric(secret)
+if (await ks.isBiometricAvailable()) {
+  const r = await ks.enableBiometric(secret)  // PIN unlock keeps working — separate slots
+  if (!r.ok && r.reason === 'prf-unsupported') {
+    // No PRF on this device: stay PIN-only, or ask the user and retry with
+    // enableBiometric(secret, { allowDeviceFallback: true }) — see Security Model.
+  }
+}
 
-// Later: unlock.
+// Later: unlock with either method (both stay usable once set up).
 const recovered = await ks.unlockBiometric() ?? await ks.unlockPIN(pin)
 
 // Wipe everything.
@@ -79,8 +85,8 @@ const plain = await decryptSecret(enc, 'a-passphrase') // throws on the wrong pa
 |--------|-------------|
 | `generateSecret()` | Random 256-bit secret as a 64-char hex string |
 | `isSetUp()` | Has any unlock method been configured? |
-| `method()` | Current `UnlockMethod` (`'pin' \| 'biometric' \| 'grace'`) or `null` |
-| `burn()` | Wipe every blob and the grace key — irreversible |
+| `method()` | Most recently configured `UnlockMethod` (`'pin' \| 'biometric' \| 'grace'`) or `null`. PIN and biometric wraps are independent — both may be usable regardless of what this reports |
+| `burn()` | Wipe every blob (current and legacy layouts) and the grace key — irreversible |
 
 **PIN:**
 
@@ -95,10 +101,20 @@ const plain = await decryptSecret(enc, 'a-passphrase') // throws on the wrong pa
 | Method | Description |
 |--------|-------------|
 | `isBiometricAvailable()` | Is a user-verifying platform authenticator available? |
-| `setupBiometric(secret)` | Protect `secret` behind a platform biometric; returns `{ ok, prfSupported }` |
+| `setupBiometric(secret, opts?)` | Protect `secret` behind a platform biometric, in its own slot (an existing PIN wrap is untouched); returns a `SetupBiometricResult` (see below) |
 | `unlockBiometric()` | Recover the secret via biometric, or `null` on failure/abort |
-| `enableBiometric(secret)` | Alias for `setupBiometric` |
-| `disableBiometric(secret, newPassphrase)` | Drop the credential, re-wrap under a PIN |
+| `enableBiometric(secret, opts?)` | Alias for `setupBiometric` |
+| `disableBiometric(secret, newPassphrase)` | Drop the biometric slot and credential, re-wrap under a PIN |
+
+`SetupBiometricResult` is a discriminated union — the device-bound fallback never happens silently:
+
+```typescript
+{ ok: true;  prfSupported: true }                              // hardware PRF key
+{ ok: true;  prfSupported: false; fallback: 'device' }         // opt-in fallback was used
+{ ok: false; prfSupported: false; reason: 'no-provider' | 'cancelled' | 'prf-unsupported' | 'error' }
+```
+
+When the authenticator lacks the PRF extension, `setupBiometric` writes **nothing** and returns `reason: 'prf-unsupported'` unless the caller passes `opts.allowDeviceFallback: true` — an explicit, per-call consent to the weaker storage-readable wrap. `endGraceWithBiometric(secret, opts?)` takes the same options.
 
 **Grace (short-lived, no-prompt unlock):**
 
@@ -119,6 +135,7 @@ const plain = await decryptSecret(enc, 'a-passphrase') // throws on the wrong pa
 | `KeystoreStorage` | Type to implement for another platform: string KV + async grace-key methods |
 | `WebAuthnProvider` | Type to implement for another platform: `isAvailable`/`createCredential`/`getPRF`/`assert` |
 | `KeystoreConfig` | `{ rpId, rpName, prfSalt, hkdfInfo?, namespace? }` |
+| `BiometricSetupOptions` | `{ allowDeviceFallback? }` — per-call opt-in to the weaker non-PRF device-bound wrap |
 
 ### Standalone primitives
 
@@ -141,12 +158,15 @@ What each unlock method protects against, and what it does not:
 | Method | Protects against | Does **not** protect against |
 |--------|-------------------|-------------------------------|
 | **PIN** | Casual/opportunistic reads of the stored blob; tampering (GCM auth tag) | Offline brute force of a **short numeric PIN** — 600,000 PBKDF2 iterations slow guessing but cannot make a 4–6 digit keyspace strong. Prefer biometric or a longer passphrase where possible |
-| **Biometric — PRF path** | Offline extraction of the stored blob: the wrapping key is derived from authenticator hardware output (HKDF), never stored | Loss/reset of the authenticator itself (no PRF ⇒ no key; there is no separate recovery path) |
-| **Biometric — fallback path (no PRF)** | A live attacker without the authenticator (still gated by `assert()`) | **Offline extraction** — the credential id used as key material is stored in the same KV as the ciphertext in plaintext, so anyone who reads the raw storage can re-derive the key without ever touching the device. `SetupBiometricResult.prfSupported: false` flags this — surface it to the user and prefer PIN as the primary method on devices without PRF |
+| **Biometric — PRF path** | Offline extraction of the stored blob: the wrapping key is derived from authenticator hardware output (HKDF), never stored | Loss/reset of the authenticator itself (no PRF ⇒ no key; there is no separate recovery path). Keep a PIN enabled alongside as a fallback unlock |
+| **Biometric — fallback path (no PRF, opt-in only)** | A live attacker without the authenticator (still gated by `assert()`) | **Offline extraction** — the credential id used as key material is stored in the same KV as the ciphertext in plaintext, so anyone who reads the raw storage can re-derive the key without ever touching the device. This wrap is **never written silently**: it requires `allowDeviceFallback: true`, and the result's `{ prfSupported: false, fallback: 'device' }` variant flags that it happened — prefer PIN as the primary method on devices without PRF |
 | **Grace** | Nothing beyond casual reads — `unlockGrace()` requires **no passphrase and no biometric check** at all. It exists purely to smooth over a page reload shortly after an explicit unlock | Anyone with script execution in the page, or read access to the grace store, for as long as the grace key is live. Call `burn()` or `endGraceWith…()` to close the window deliberately |
 | **Burn** | — | Data already exfiltrated before `burn()` was called; it is a wipe, not a revocation |
 
 Other things worth knowing:
+
+- **PIN and biometric wraps live in independent slots.** Enabling biometric unlock never destroys the PIN wrap (and vice versa), so losing the platform credential cannot lock a PIN-enabled user out. `method()` reports only the *most recently configured* method; both unlock paths remain usable.
+- **Storage layout and migration.** The current layout is `<ns>.pin.encryptedKey`, `<ns>.biometric.credentialId`, `<ns>.biometric.encryptedKey` (plus the informational `<ns>.method` flag). Pre-0.2 data — a single `<ns>.encryptedKey` slot and `<ns>.credentialId` — still unlocks: the old entries are read wherever the new ones are absent, distinguished by shape (biometric wraps carry a `prf` flag, PIN wraps do not). Re-enabling a method rewrites its wrap into the new slot and removes the stale legacy copy; `burn()` wipes both layouts.
 
 - **Tampering is detected, not silently accepted.** AES-GCM's authentication tag makes a modified ciphertext fail to decrypt; the higher-level `Keystore` API turns that failure into a `null` return (never a distinguishable error) so callers can't tell "wrong PIN" from "corrupted blob" from the response shape alone.
 - **The grace slot is per storage instance, not per namespace.** `KeystoreConfig.namespace` isolates PIN/biometric storage keys between multiple `Keystore`s sharing one storage backend, but `KeystoreStorage.saveGraceKey`/`getGraceKey` take no namespace — two keystores sharing a storage instance share one grace slot. Use one storage instance per app if independent grace windows are required.
