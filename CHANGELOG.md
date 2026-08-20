@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-08-20
+
+- Release plumbing only, no code change: `publishConfig.provenance`, the
+  anvil release workflow, and RELEASING.md. 0.2.0 was tagged before that
+  plumbing existed, so the first published version is this one.
+
 ## 0.2.0 - 2026-08-20
 
 - Independent PIN and biometric slots: `setupBiometric`/`enableBiometric` no longer overwrite the PIN wrap, so both methods stay usable at once. Legacy single-slot data still unlocks and migrates on re-enable.

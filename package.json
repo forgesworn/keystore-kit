@@ -1,6 +1,6 @@
 {
   "name": "keystore-kit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Browser key-at-rest: protect a secret with PIN / WebAuthn-PRF / grace, pluggable storage, burn. Curve-agnostic, pure Web Crypto, zero runtime deps.",
   "type": "module",
   "main": "./dist/index.js",

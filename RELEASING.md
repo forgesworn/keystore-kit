@@ -19,7 +19,7 @@ involved.
 The seed is a **prerelease on the `next` tag**, not the real version:
 
 ```bash
-npm version 0.2.0-next.0 --no-git-tag-version
+npm version 0.2.1-next.0 --no-git-tag-version
 npm publish --tag next --no-provenance
 git checkout -- package.json package-lock.json
 ```
@@ -31,17 +31,17 @@ Three things that matter here:
   local publish without this flag fails.
 - `--tag next` keeps the seed off `latest`, so nothing installs the
   unattested bootstrap version by accident.
-- Seeding a *prerelease* leaves `0.2.0` itself unclaimed, so anvil publishes
+- Seeding a *prerelease* leaves `0.2.1` itself unclaimed, so anvil publishes
   the real first version with full provenance. Every version anyone actually
-  installs is attested. (Seeding `0.2.0` directly would burn that version and
+  installs is attested. (Seeding `0.2.1` directly would burn that version and
   force the debut release to be a patch.)
 
-Do not create a GitHub Release for the seed. Once the real `0.2.0` is out, tidy
+Do not create a GitHub Release for the seed. Once the real `0.2.1` is out, tidy
 up:
 
 ```bash
 npm dist-tag rm keystore-kit next
-npm deprecate keystore-kit@0.2.0-next.0 "bootstrap seed - use 0.2.0 or later"
+npm deprecate keystore-kit@0.2.1-next.0 "bootstrap seed - use 0.2.1 or later"
 ```
 
 [issue]: https://github.com/npm/cli/issues/8544
@@ -69,7 +69,7 @@ After the seed exists, wire OIDC so no token is ever needed again.
 4. Cut the release:
 
    ```bash
-   gh release create v0.2.0 --title v0.2.0 --notes-from-tag
+   gh release create v0.2.1 --title v0.2.1 --notes-from-tag
    ```
 
    The `release: published` event fires `release.yml`, which runs anvil's gates,
