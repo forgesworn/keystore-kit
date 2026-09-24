@@ -55,6 +55,7 @@
     "vitest": "^4.1.10"
   },
   "files": [
-    "dist"
+    "dist",
+    "llms.txt"
   ]
 }
